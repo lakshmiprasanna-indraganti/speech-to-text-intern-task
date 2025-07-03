@@ -1,0 +1,480 @@
+import streamlit as st
+import speech_recognition as sr
+import os
+import tempfile
+import base64
+from datetime import datetime
+from pydub import AudioSegment
+
+class AudioProcessor:
+    def __init__(self):
+        self.supported_formats = ['wav', 'mp3', 'm4a', 'flac', 'ogg']
+        
+    def convert_to_wav(self, input_path):
+        try:
+            file_extension = os.path.splitext(input_path)[1].lower().replace('.', '')
+            
+            if file_extension == 'wav':
+                return input_path
+            
+            if file_extension == 'mp3':
+                audio = AudioSegment.from_mp3(input_path)
+            elif file_extension == 'm4a':
+                audio = AudioSegment.from_file(input_path, format='m4a')
+            elif file_extension == 'flac':
+                audio = AudioSegment.from_file(input_path, format='flac')
+            elif file_extension == 'ogg':
+                audio = AudioSegment.from_file(input_path, format='ogg')
+            else:
+                audio = AudioSegment.from_file(input_path)
+            
+            audio = audio.set_channels(1)
+            audio = audio.set_frame_rate(16000)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                wav_path = tmp_file.name
+            
+            audio.export(wav_path, format='wav')
+            return wav_path
+            
+        except Exception as e:
+            raise Exception(f"Error converting audio file: {str(e)}")
+    
+    def get_supported_formats(self):
+        return self.supported_formats.copy()
+
+class SpeechRecognizer:
+    def __init__(self):
+        self.recognizer = sr.Recognizer()
+        self.microphone = None
+        
+        try:
+            self.microphone = sr.Microphone()
+            with self.microphone as source:
+                pass
+        except Exception:
+            self.microphone = None
+    
+    def transcribe_audio(self, audio_file_path, engine='google', language='en-US'):
+        try:
+            with sr.AudioFile(audio_file_path) as source:
+                self.recognizer.adjust_for_ambient_noise(source)
+                audio_data = self.recognizer.record(source)
+            
+            if engine.lower() == 'google':
+                return self._transcribe_with_google(audio_data, language)
+            elif engine.lower() == 'sphinx':
+                return self._transcribe_with_sphinx(audio_data, language)
+            else:
+                raise ValueError(f"Unsupported engine: {engine}")
+                
+        except sr.UnknownValueError:
+            raise Exception("Could not understand audio - please ensure the audio is clear and contains speech")
+        except sr.RequestError as e:
+            raise Exception(f"Could not request results from speech recognition service: {str(e)}")
+        except Exception as e:
+            raise Exception(f"Error during transcription: {str(e)}")
+    
+    def _transcribe_with_google(self, audio_data, language):
+        try:
+            api_key = os.getenv('GOOGLE_SPEECH_API_KEY')
+            
+            if api_key:
+                text = self.recognizer.recognize_google(audio_data, language=language, key=api_key)
+            else:
+                text = self.recognizer.recognize_google(audio_data, language=language)
+            
+            return {
+                'text': text,
+                'confidence': 0.85,
+                'engine': 'google',
+                'language': language
+            }
+            
+        except sr.UnknownValueError:
+            raise Exception("Google Speech Recognition could not understand the audio")
+        except sr.RequestError as e:
+            raise Exception(f"Google Speech Recognition service error: {str(e)}")
+    
+    def _transcribe_with_sphinx(self, audio_data, language):
+        try:
+            text = self.recognizer.recognize_sphinx(audio_data)
+            
+            return {
+                'text': text,
+                'confidence': 0.70,
+                'engine': 'sphinx',
+                'language': language
+            }
+            
+        except sr.UnknownValueError:
+            raise Exception("Sphinx could not understand the audio")
+        except sr.RequestError as e:
+            raise Exception(f"Sphinx recognition error: {str(e)}")
+    
+    def record_audio(self, duration=None, timeout=5):
+        if not self.microphone:
+            raise Exception("Microphone not available")
+        
+        try:
+            with self.microphone as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+                
+                if duration:
+                    audio_data = self.recognizer.record(source, duration=duration)
+                else:
+                    audio_data = self.recognizer.listen(source, timeout=timeout)
+            
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
+                tmp_file.write(audio_data.get_wav_data())
+                return tmp_file.name
+                
+        except sr.WaitTimeoutError:
+            raise Exception("Recording timeout - no audio detected")
+        except Exception as e:
+            raise Exception(f"Error recording audio: {str(e)}")
+    
+    def test_microphone(self):
+        if not self.microphone:
+            return {
+                'available': False,
+                'error': 'Microphone not detected'
+            }
+        
+        try:
+            with self.microphone as source:
+                self.recognizer.adjust_for_ambient_noise(source, duration=1)
+            
+            return {
+                'available': True,
+                'sample_rate': self.microphone.SAMPLE_RATE,
+                'chunk_size': self.microphone.CHUNK
+            }
+            
+        except Exception as e:
+            return {
+                'available': False,
+                'error': str(e)
+            }
+
+def format_confidence_score(confidence):
+    if confidence is None:
+        return "N/A"
+    
+    percentage = confidence * 100
+    
+    if percentage >= 90:
+        return f"{percentage:.1f}% 🟢"
+    elif percentage >= 70:
+        return f"{percentage:.1f}% 🟡"
+    else:
+        return f"{percentage:.1f}% 🔴"
+
+@st.cache_resource
+def get_audio_processor():
+    return AudioProcessor()
+
+@st.cache_resource
+def get_speech_recognizer():
+    return SpeechRecognizer()
+
+def main():
+    st.set_page_config(
+        page_title="Speech-to-Text Converter",
+        page_icon="🎤",
+        layout="wide",
+        initial_sidebar_state="collapsed"
+    )
+    
+    st.title("🎤 Speech-to-Text Converter")
+    st.markdown("Convert audio files or record speech in real-time to text using advanced speech recognition technology.")
+    
+    if 'transcription_history' not in st.session_state:
+        st.session_state.transcription_history = []
+    
+    audio_processor = get_audio_processor()
+    speech_recognizer = get_speech_recognizer()
+    
+    tab1, tab2, tab3 = st.tabs(["📁 File Upload", "🎙️ Record Audio", "📜 History"])
+    
+    with tab1:
+        file_upload_tab(audio_processor, speech_recognizer)
+    
+    with tab2:
+        record_audio_tab(audio_processor, speech_recognizer)
+    
+    with tab3:
+        history_tab()
+
+def file_upload_tab(audio_processor, speech_recognizer):
+    st.header("Upload Audio File")
+    st.markdown("Upload audio files in WAV, MP3, or M4A format for transcription.")
+    
+    uploaded_file = st.file_uploader(
+        "Choose an audio file",
+        type=['wav', 'mp3', 'm4a', 'flac', 'ogg'],
+        help="Supported formats: WAV, MP3, M4A, FLAC, OGG"
+    )
+    
+    if uploaded_file is not None:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.info(f"**File:** {uploaded_file.name}")
+            st.info(f"**Size:** {uploaded_file.size / 1024:.2f} KB")
+        
+        with col2:
+            st.info(f"**Type:** {uploaded_file.type}")
+        
+        st.audio(uploaded_file, format='audio/wav')
+        
+        st.subheader("Transcription Options")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            engine = st.selectbox(
+                "Recognition Engine",
+                ["Google", "Sphinx"],
+                help="Google requires internet connection but provides better accuracy"
+            )
+        
+        with col2:
+            language = st.selectbox(
+                "Language",
+                ["en-US", "en-GB", "es-ES", "fr-FR", "de-DE", "it-IT", "pt-BR"],
+                help="Select the language of the audio"
+            )
+        
+        if st.button("🔄 Transcribe Audio", type="primary"):
+            transcribe_uploaded_file(uploaded_file, audio_processor, speech_recognizer, engine, language)
+
+def record_audio_tab(audio_processor, speech_recognizer):
+    st.header("Record Audio")
+    st.markdown("Click the button below to start recording audio from your microphone.")
+    
+    mic_test = speech_recognizer.test_microphone()
+    if not mic_test['available']:
+        st.error(f"Microphone not available: {mic_test.get('error', 'Unknown error')}")
+        st.info("Note: Microphone recording may not work in all environments. Try uploading an audio file instead.")
+        return
+    
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("🔴 Start Recording (5 seconds)", type="primary"):
+            try:
+                with st.spinner("Recording audio..."):
+                    recorded_file = speech_recognizer.record_audio(duration=5)
+                    st.session_state.recorded_audio = recorded_file
+                    st.success("Recording completed!")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Recording failed: {str(e)}")
+    
+    with col2:
+        if st.button("🎙️ Record Until Silence", type="primary"):
+            try:
+                with st.spinner("Recording audio... Speak now!"):
+                    recorded_file = speech_recognizer.record_audio(duration=None)
+                    st.session_state.recorded_audio = recorded_file
+                    st.success("Recording completed!")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Recording failed: {str(e)}")
+    
+    with col3:
+        if st.button("🗑️ Clear Recording"):
+            if 'recorded_audio' in st.session_state:
+                if os.path.exists(st.session_state.recorded_audio):
+                    os.unlink(st.session_state.recorded_audio)
+                del st.session_state.recorded_audio
+                st.success("Recording cleared!")
+                st.rerun()
+    
+    if st.session_state.get('recorded_audio') and os.path.exists(st.session_state.recorded_audio):
+        st.success("✅ Audio recorded successfully!")
+        
+        with open(st.session_state.recorded_audio, 'rb') as audio_file:
+            st.audio(audio_file.read(), format='audio/wav')
+        
+        st.subheader("Transcription Options")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            engine = st.selectbox(
+                "Recognition Engine",
+                ["Google", "Sphinx"],
+                key="record_engine",
+                help="Google requires internet connection but provides better accuracy"
+            )
+        
+        with col2:
+            language = st.selectbox(
+                "Language",
+                ["en-US", "en-GB", "es-ES", "fr-FR", "de-DE", "it-IT", "pt-BR"],
+                key="record_language",
+                help="Select the language of the audio"
+            )
+        
+        if st.button("🔄 Transcribe Recording", type="primary"):
+            transcribe_recorded_audio(speech_recognizer, engine, language)
+
+def transcribe_uploaded_file(uploaded_file, audio_processor, speech_recognizer, engine, language):
+    with st.spinner("Processing audio file..."):
+        tmp_file_path = None
+        wav_path = None
+        
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_file_path = tmp_file.name
+            
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            status_text.text("Converting audio format...")
+            progress_bar.progress(25)
+            
+            wav_path = audio_processor.convert_to_wav(tmp_file_path)
+            
+            status_text.text("Transcribing audio...")
+            progress_bar.progress(50)
+            
+            result = speech_recognizer.transcribe_audio(wav_path, engine.lower(), language)
+            
+            progress_bar.progress(100)
+            status_text.text("Transcription completed!")
+            
+            display_transcription_results(result, uploaded_file.name)
+            
+        except Exception as e:
+            st.error(f"Error processing audio: {str(e)}")
+            st.info("Common issues and solutions:")
+            st.info("• **File format**: Ensure your file is in WAV, MP3, M4A, FLAC, or OGG format")
+            st.info("• **File size**: Large files may take longer to process")
+            st.info("• **Internet connection**: Google engine requires internet connection")
+            st.info("• **Audio quality**: Clear speech works best for transcription")
+            
+        finally:
+            if tmp_file_path and os.path.exists(tmp_file_path):
+                os.unlink(tmp_file_path)
+            if wav_path and wav_path != tmp_file_path and os.path.exists(wav_path):
+                os.unlink(wav_path)
+
+def transcribe_recorded_audio(speech_recognizer, engine, language):
+    with st.spinner("Transcribing recorded audio..."):
+        try:
+            recorded_file = st.session_state.get('recorded_audio')
+            if not recorded_file or not os.path.exists(recorded_file):
+                st.error("No recorded audio found. Please record audio first.")
+                return
+            
+            result = speech_recognizer.transcribe_audio(recorded_file, engine.lower(), language)
+            
+            display_transcription_results(result, "Recorded Audio")
+            
+        except Exception as e:
+            st.error(f"Error transcribing audio: {str(e)}")
+            st.info("If you're having trouble with recognition, try:")
+            st.info("• Speaking more clearly and loudly")
+            st.info("• Using the Google engine (requires internet)")
+            st.info("• Uploading an audio file instead")
+
+def display_transcription_results(result, source_name):
+    st.success("🎉 Transcription completed successfully!")
+    
+    with st.container():
+        st.subheader("Transcription Results")
+        
+        st.markdown("### 📝 Transcribed Text")
+        st.text_area(
+            "Transcription",
+            value=result['text'],
+            height=200,
+            disabled=True,
+            key=f"transcription_{len(st.session_state.transcription_history)}"
+        )
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Confidence Score", format_confidence_score(result['confidence']))
+        
+        with col2:
+            st.metric("Engine", result['engine'].title())
+        
+        with col3:
+            st.metric("Language", result['language'])
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"transcription_{timestamp}.txt"
+        
+        download_content = f"""Speech-to-Text Transcription
+Source: {source_name}
+Date: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+Engine: {result['engine'].title()}
+Language: {result['language']}
+Confidence: {format_confidence_score(result['confidence'])}
+
+Transcribed Text:
+{result['text']}
+"""
+        
+        st.download_button(
+            label="📥 Download Transcription",
+            data=download_content,
+            file_name=filename,
+            mime="text/plain",
+            type="secondary"
+        )
+        
+        st.session_state.transcription_history.append({
+            'timestamp': datetime.now(),
+            'source': source_name,
+            'text': result['text'],
+            'confidence': result['confidence'],
+            'engine': result['engine'],
+            'language': result['language']
+        })
+
+def history_tab():
+    st.header("Transcription History")
+    
+    if not st.session_state.transcription_history:
+        st.info("No transcriptions yet. Upload an audio file or record audio to get started!")
+        return
+    
+    for i, entry in enumerate(reversed(st.session_state.transcription_history)):
+        with st.expander(f"📄 {entry['source']} - {entry['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}"):
+            st.write(f"**Engine:** {entry['engine'].title()}")
+            st.write(f"**Language:** {entry['language']}")
+            st.write(f"**Confidence:** {format_confidence_score(entry['confidence'])}")
+            st.write(f"**Text:** {entry['text']}")
+            
+            timestamp = entry['timestamp'].strftime("%Y%m%d_%H%M%S")
+            filename = f"transcription_{timestamp}.txt"
+            
+            download_content = f"""Speech-to-Text Transcription
+Source: {entry['source']}
+Date: {entry['timestamp'].strftime("%Y-%m-%d %H:%M:%S")}
+Engine: {entry['engine'].title()}
+Language: {entry['language']}
+Confidence: {format_confidence_score(entry['confidence'])}
+
+Transcribed Text:
+{entry['text']}
+"""
+            
+            st.download_button(
+                label="📥 Download",
+                data=download_content,
+                file_name=filename,
+                mime="text/plain",
+                key=f"download_{i}"
+            )
+    
+    if st.button("🗑️ Clear History", type="secondary"):
+        st.session_state.transcription_history = []
+        st.rerun()
+
+if __name__ == "__main__":
+    main()
